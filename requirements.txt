@@ -4,3 +4,4 @@ numpy
 matplotlib
 joblib
 statsmodels
+huggingface_hub
