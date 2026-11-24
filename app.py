@@ -2,6 +2,7 @@
 # Electricity Demand Forecasting Application
 # ============================================
 
+from huggingface_hub import hf_hub_download
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -38,9 +39,12 @@ HISTORY_PATH = BASE_DIR / "artifacts" / "final_training_history.csv"
 
 @st.cache_resource
 def load_model():
+    model_path = hf_hub_download(
+        repo_id="shivamparihar069/electricity-demand-sarima",
+        filename="final_sarima_model.pkl"
+    )
 
-    model = SARIMAXResults.load(MODEL_PATH)
-
+    model = SARIMAXResults.load(model_path)
     return model
 
 
