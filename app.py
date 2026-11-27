@@ -2,6 +2,7 @@
 # Electricity Demand Forecasting Application
 # ============================================
 
+from huggingface_hub import hf_hub_download
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,7 +10,6 @@ import matplotlib.pyplot as plt
 import joblib
 
 from pathlib import Path
-from huggingface_hub import hf_hub_download
 from statsmodels.tsa.statespace.sarimax import SARIMAXResults
 
 
@@ -30,7 +30,10 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).resolve().parent
 
+MODEL_PATH = BASE_DIR / "artifacts" / "models" / "final_sarima_model.pkl"
+
 METADATA_PATH = BASE_DIR / "artifacts" / "models" / "forecast_metadata.pkl"
+
 HISTORY_PATH = BASE_DIR / "artifacts" / "final_training_history.csv"
 
 
@@ -40,32 +43,36 @@ def load_model():
         repo_id="shivamparihar069/electricity-demand-sarima",
         filename="final_sarima_model.pkl"
     )
-    return SARIMAXResults.load(model_path)
+
+    model = SARIMAXResults.load(model_path)
+    return model
 
 
 @st.cache_data
 def load_metadata():
-    return joblib.load(METADATA_PATH)
+
+    metadata = joblib.load(METADATA_PATH)
+
+    return metadata
 
 
 @st.cache_data
 def load_historical_data():
-    return pd.read_csv(
+
+    historical_data = pd.read_csv(
         HISTORY_PATH,
         index_col=0,
         parse_dates=True
     )
 
+    return historical_data
 
-# Show a helpful message if model or files fail to load
-try:
-    final_model = load_model()
-    forecast_metadata = load_metadata()
-    historical_data = load_historical_data()
-except Exception as error:
-    st.error("The model or required data files could not be loaded.")
-    st.exception(error)
-    st.stop()
+
+final_model = load_model()
+
+forecast_metadata = load_metadata()
+
+historical_data = load_historical_data()
 
 
 # ============================================
@@ -79,9 +86,7 @@ st.write(
     This application forecasts future hourly electricity demand
     using a trained SARIMA time-series forecasting model.
 
-    Enter how many hours ahead you want to forecast.
-    Forecasts begin immediately after the last timestamp in the
-    historical dataset used to train the model.
+    Enter the number of future hours you want to predict.
     """
 )
 
@@ -92,97 +97,162 @@ st.write(
 
 st.subheader("Forecast Settings")
 
-forecast_horizon = st.number_input(
-    "Forecast Horizon (Hours)",
-    min_value=1,
-    value=24,
-    step=1
-)
+col1, col2, col3 = st.columns(3)
 
-last_datetime = pd.Timestamp(forecast_metadata["last_datetime"])
-forecast_start = last_datetime + pd.Timedelta(hours=1)
+with col1:
+    forecast_date = st.date_input(
+        "Forecast Start Date",
+        min_value=pd.Timestamp.now().date(),
+        value=pd.Timestamp.now().date()
+    )
 
-st.info(
-    f"Forecast will start from: **{forecast_start.strftime('%Y-%m-%d %H:%M')}** "
-    f"(based on the last historical timestamp: {last_datetime.strftime('%Y-%m-%d %H:%M')})"
-)
+with col2:
+    forecast_time = st.time_input(
+        "Forecast Start Time",
+        value=pd.Timestamp.now().time().replace(minute=0, second=0, microsecond=0)
+    )
+
+with col3:
+    forecast_horizon = st.number_input(
+        "Forecast Duration (Hours)",
+        min_value=1,
+        value=24,
+        step=1
+    )
 
 
 # ============================================
 # 5. FORECAST FUNCTION
 # ============================================
 
-def forecast_electricity_demand(horizon):
-    if not isinstance(horizon, (int, np.integer)) or isinstance(horizon, bool):
-        raise ValueError("Forecast horizon must be a positive integer.")
+def forecast_electricity_demand(start_datetime, horizon):
 
     if horizon <= 0:
         raise ValueError("Forecast horizon must be greater than zero.")
 
-    last_datetime = pd.Timestamp(forecast_metadata["last_datetime"])
+    # Get current datetime
+    current_datetime = pd.Timestamp.now().floor("h")
+
+    # Calculate how many hours ahead the selected start is
+    start_datetime = pd.Timestamp(start_datetime).floor("h")
+
+    hours_ahead = int(
+        (start_datetime - current_datetime).total_seconds() / 3600
+    )
+
+    if hours_ahead < 0:
+        raise ValueError("Forecast start time cannot be in the past.")
+
+    # Forecast enough hours to reach the selected date/time
+    total_steps = hours_ahead + int(forecast_horizon)
+
+    predictions = final_model.forecast(steps=total_steps)
+
+    # Select predictions corresponding to the requested period
+    selected_predictions = np.asarray(predictions)[
+        hours_ahead:hours_ahead + int(forecast_horizon)
+    ]
 
     future_dates = pd.date_range(
-        start=last_datetime + pd.Timedelta(hours=1),
-        periods=int(horizon),
+        start=start_datetime,
+        periods=int(forecast_horizon),
         freq="h"
     )
 
-    predictions = final_model.forecast(steps=int(horizon))
-
     forecast_df = pd.DataFrame({
         "Datetime": future_dates,
-        "Predicted_PJMW_MW": np.asarray(predictions)
+        "Predicted_PJMW_MW": selected_predictions
     })
 
     return forecast_df
 
 
 # ============================================
-# 6. GENERATE FORECAST
+# 6. GENERATE FORECAST BUTTON
 # ============================================
 
 if st.button("Generate Forecast", type="primary"):
 
-    try:
-        with st.spinner("Generating electricity demand forecast..."):
-            forecast_df = forecast_electricity_demand(
-                int(forecast_horizon)
-            )
+    with st.spinner("Generating electricity demand forecast..."):
+        selected_datetime = pd.Timestamp.combine(forecast_date, forecast_time)
+        forecast_df = forecast_electricity_demand(selected_datetime,int(forecast_horizon))
+        
+    st.success("Forecast generated successfully!")
 
-        st.success("Forecast generated successfully!")
 
-        # ========================================
-        # 7. FORECAST SUMMARY
-        # ========================================
+    # ========================================
+    # 7. DISPLAY FORECAST SUMMARY
+    # ========================================
 
-        st.subheader("Forecast Summary")
+    st.subheader("Forecast Summary")
 
-        col1, col2, col3 = st.columns(3)
+    col1, col2, col3 = st.columns(3)
 
-        with col1:
-            st.metric("Forecast Hours", len(forecast_df))
+    with col1:
 
-        with col2:
-            st.metric(
-                "Average Predicted Demand",
-                f"{forecast_df['Predicted_PJMW_MW'].mean():,.2f} MW"
-            )
+        st.metric(
+            "Forecast Hours",
+            len(forecast_df)
+        )
 
-        with col3:
-            st.metric(
-                "Maximum Predicted Demand",
-                f"{forecast_df['Predicted_PJMW_MW'].max():,.2f} MW"
-            )
+    with col2:
 
-        # ========================================
-        # 8. FORECAST VISUALIZATION
-        # ========================================
+        st.metric(
+            "Average Predicted Demand",
+            f"{forecast_df['Predicted_PJMW_MW'].mean():,.2f} MW"
+        )
 
-        st.subheader("Electricity Demand Forecast")
+    with col3:
 
-        fig, ax = plt.subplots(figsize=(14, 6))
+        st.metric(
+            "Maximum Predicted Demand",
+            f"{forecast_df['Predicted_PJMW_MW'].max():,.2f} MW"
+        )
+
+
+    # ==========================================
+    # FORECAST VISUALIZATION
+    # ==========================================
+
+    st.subheader("Electricity Demand Forecast")
+
+    # Plot ONLY the forecast period
+    fig, ax = plt.subplots(figsize=(14, 6))
+
+    ax.plot(
+        forecast_df["Datetime"],
+        forecast_df["Predicted_PJMW_MW"],
+        color="red",
+        linestyle="--",
+        marker="o",
+        markersize=3,
+        label="Forecasted Demand"
+    )
+
+    ax.set_title("Future Electricity Demand Forecast")
+    ax.set_xlabel("Datetime")
+    ax.set_ylabel("Electricity Demand (MW)")
+
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    st.pyplot(fig)
+
+    plt.close(fig)
+
+
+    # ==========================================
+    # HISTORICAL DEMAND (SEPARATE GRAPH)
+    # ==========================================
+
+    with st.expander("View Historical Electricity Demand"):
 
         historical_to_plot = historical_data.tail(168)
+
+        fig, ax = plt.subplots(figsize=(14, 5))
 
         ax.plot(
             historical_to_plot.index,
@@ -191,26 +261,10 @@ if st.button("Generate Forecast", type="primary"):
             label="Historical Demand"
         )
 
-        ax.plot(
-            forecast_df["Datetime"],
-            forecast_df["Predicted_PJMW_MW"],
-            color="red",
-            linestyle="--",
-            marker="o",
-            markersize=3,
-            label="Forecasted Demand"
-        )
-
-        ax.axvline(
-            x=forecast_df["Datetime"].iloc[0],
-            color="black",
-            linestyle=":",
-            label="Forecast Start"
-        )
-
-        ax.set_title("Historical and Forecasted Electricity Demand")
+        ax.set_title("Historical Electricity Demand (Last 7 Days)")
         ax.set_xlabel("Datetime")
         ax.set_ylabel("Electricity Demand (MW)")
+
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -218,40 +272,45 @@ if st.button("Generate Forecast", type="primary"):
         plt.tight_layout()
 
         st.pyplot(fig)
+
         plt.close(fig)
 
-        # ========================================
-        # 9. FORECAST TABLE
-        # ========================================
 
-        st.subheader("Forecast Data")
+    # ========================================
+    # 9. DISPLAY FORECAST TABLE
+    # ========================================
 
-        display_forecast = forecast_df.copy()
-        display_forecast["Datetime"] = display_forecast["Datetime"].dt.strftime(
-            "%Y-%m-%d %H:%M"
-        )
-        display_forecast["Predicted_PJMW_MW"] = (
-            display_forecast["Predicted_PJMW_MW"].round(2)
-        )
+    st.subheader("Forecast Data")
 
-        st.dataframe(
-            display_forecast,
-            use_container_width=True
-        )
+    display_forecast = forecast_df.copy()
 
-        # ========================================
-        # 10. DOWNLOAD FORECAST
-        # ========================================
+    display_forecast["Datetime"] = (
+        display_forecast["Datetime"]
+        .dt.strftime("%Y-%m-%d %H:%M")
+    )
 
-        csv_data = forecast_df.to_csv(index=False).encode("utf-8")
+    display_forecast["Predicted_PJMW_MW"] = (
+        display_forecast["Predicted_PJMW_MW"]
+        .round(2)
+    )
 
-        st.download_button(
-            label="Download Forecast CSV",
-            data=csv_data,
-            file_name="electricity_demand_forecast.csv",
-            mime="text/csv"
-        )
+    st.dataframe(
+        display_forecast,
+        use_container_width=True
+    )
 
-    except Exception as error:
-        st.error("Forecast generation failed.")
-        st.exception(error)
+
+    # ========================================
+    # 10. DOWNLOAD FORECAST
+    # ========================================
+
+    csv_data = forecast_df.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    st.download_button(
+        label="Download Forecast CSV",
+        data=csv_data,
+        file_name="electricity_demand_forecast.csv",
+        mime="text/csv"
+    )
